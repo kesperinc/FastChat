@@ -35,7 +35,7 @@ class SimpleChatIO(ChatIO):
                 print(" ".join(outputs[pre:now]), end=" ", flush=True)
                 pre = now
         print(" ".join(outputs[pre:]), flush=True)
-        return outputs
+        return " ".join(outputs)
 
 
 class RichChatIO(ChatIO):
@@ -60,33 +60,41 @@ class RichChatIO(ChatIO):
 
     def stream_output(self, output_stream, skip_echo_len: int):
         """Stream output from a role."""
-        pre = 0
         # TODO(suquark): the console flickers when there is a code block
         #  above it. We need to cut off "live" when a code block is done.
 
         # Create a Live context for updating the console output
         with Live(console=self._console, refresh_per_second=4) as live:
-            accumulated_text = ""
             # Read lines from the stream
             for outputs in output_stream:
-                outputs = outputs[skip_echo_len:].strip()
-                outputs = outputs.split(" ")
-                now = len(outputs) - 1
-                if now > pre:
-                    accumulated_text += " ".join(outputs[pre:now]) + " "
-                    pre = now
+                accumulated_text = outputs[skip_echo_len:]
+                if not accumulated_text:
+                    continue
                 # Render the accumulated text as Markdown
-                markdown = Markdown(accumulated_text)
-                
+                # NOTE: this is a workaround for the rendering "unstandard markdown"
+                #  in rich. The chatbots output treat "\n" as a new line for
+                #  better compatibility with real-world text. However, rendering
+                #  in markdown would break the format. It is because standard markdown
+                #  treat a single "\n" in normal text as a space.
+                #  Our workaround is adding two spaces at the end of each line.
+                #  This is not a perfect solution, as it would
+                #  introduce trailing spaces (only) in code block, but it works well
+                #  especially for console output, because in general the console does not
+                #  care about trailing spaces.
+                lines = []
+                for line in accumulated_text.splitlines():
+                    lines.append(line)
+                    if line.startswith("```"):
+                        # Code block marker - do not add trailing spaces, as it would
+                        #  break the syntax highlighting
+                        lines.append("\n")
+                    else:
+                        lines.append("  \n")
+                markdown = Markdown("".join(lines))
                 # Update the Live console output
                 live.update(markdown)
-
-            accumulated_text += " ".join(outputs[pre:])
-            markdown = Markdown(accumulated_text)
-            live.update(markdown)
-
         self._console.print()
-        return outputs
+        return outputs[skip_echo_len:]
 
 
 def main(args):
@@ -97,21 +105,23 @@ def main(args):
     else:
         raise ValueError(f"Invalid style for console: {args.style}")
     try:
-        chat_loop(args.model_name, args.device, args.num_gpus, args.load_8bit,
-                args.conv_template, args.temperature, args.max_new_tokens,
-                chatio, args.debug)
+        chat_loop(args.model_path, args.device, args.num_gpus, args.max_gpu_memory,
+            args.load_8bit, args.conv_template, args.temperature, args.max_new_tokens,
+            chatio, args.debug)
     except KeyboardInterrupt:
         print("exit...")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-name", type=str, default="facebook/opt-350m")
+    parser.add_argument("--model-path", type=str, default="facebook/opt-350m",
+        help="The path to the weights")
     parser.add_argument("--device", type=str, choices=["cpu", "cuda", "mps"], default="cuda")
     parser.add_argument("--num-gpus", type=str, default="1")
+    parser.add_argument("--max-gpu-memory", type=str, default="13GiB")
     parser.add_argument("--load-8bit", action="store_true",
         help="Use 8-bit quantization.")
-    parser.add_argument("--conv-template", type=str, default="v1",
+    parser.add_argument("--conv-template", type=str, default=None,
         help="Conversation prompt template.")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-new-tokens", type=int, default=512)
